@@ -416,20 +416,21 @@ def assign_tier(a: Attendee) -> None:
 
     # Tier scoring baseline
     if a.role_class == "GC_PRIME":
-        if a.zoho_status in ("Existing Client", "Prior Work", "Existing Account"):
+        if a.zoho_status in ("Existing Client", "Prior Work"):
             a.tier, a.tier_label = 1, "Tier 1 — Prime GC + Relationship"
         elif a.zoho_status == "Warm Contact":
             a.tier, a.tier_label = 2, "Tier 2 — Prime GC + Warm Contact"
         else:
             a.tier, a.tier_label = 3, "Tier 3 — Prime GC (Cold)"
     elif a.role_class == "POSSIBLE_GC_PRIME":
+        # Same as Tier 3 but mark reasoning
         if a.zoho_status != "Cold":
-            a.tier, a.tier_label = 1, "Tier 1 — Prime GC + Relationship"
+            a.tier, a.tier_label = 3, "Tier 3 — Possible Prime GC + Relationship"
         else:
             a.tier, a.tier_label = 4, "Tier 4 — Possible Prime GC (Cold)"
     elif a.role_class == "DESIGN_PRIME":
         if a.zoho_status != "Cold":
-            a.tier, a.tier_label = 2, "Tier 2 — Design/Consultant + Relationship"
+            a.tier, a.tier_label = 4, "Tier 4 — Design Prime + Relationship"
         else:
             a.tier, a.tier_label = 5, "Tier 5 — Design Prime (Cold)"
     elif a.role_class in ("DESIGN_CONSULTANT", "SUB"):
@@ -463,7 +464,10 @@ def go_deep(
         gc_primes = HEAVY_CIVIL_GC_PRIMES
         design_primes = HEAVY_CIVIL_DESIGN_PRIMES
     else:
-        raise NotImplementedError(f"Sector not yet supported: {sector}")
+        # Default to heavy civil primes — Zoho relationship matching
+        # still works regardless of sector
+        gc_primes = HEAVY_CIVIL_GC_PRIMES
+        design_primes = HEAVY_CIVIL_DESIGN_PRIMES
 
     if accounts is None:
         # Try live Zoho pull first, fall back to stub
@@ -609,10 +613,81 @@ def write_excel(attendees: list[Attendee], out_path: str) -> None:
 
 
 # ============================================================
+# Apollo contact enrichment
+# ============================================================
+
+APOLLO_TARGET_TITLES = [
+    "preconstruction", "pre-construction", "estimating", "estimator",
+    "business development", "project executive", "vice president",
+    "director", "chief estimator", "proposal", "pursuit",
+]
+
+APOLLO_MAX_ORGS = 15  # Cap orgs to search per run
+APOLLO_MAX_PER_ORG = 3  # Max contacts per org
+
+
+def apollo_enrich(org_names: list[str]) -> dict[str, list[dict]]:
+    """Search Apollo for decision-maker contacts at each org.
+    Returns {org_name: [{name, title, email, phone, linkedin}]}."""
+    api_key = os.environ.get("APOLLO_API_KEY")
+    if not api_key:
+        print("APOLLO_API_KEY not set -- skipping enrichment")
+        return {}
+
+    results: dict[str, list[dict]] = {}
+
+    for org in org_names[:APOLLO_MAX_ORGS]:
+        try:
+            r = requests.post(
+                "https://api.apollo.io/api/v1/mixed_people/search",
+                headers={
+                    "X-Api-Key": api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "q_organization_name": org,
+                    "person_titles": APOLLO_TARGET_TITLES,
+                    "person_seniorities": ["vp", "director", "c_suite", "owner", "partner"],
+                    "per_page": APOLLO_MAX_PER_ORG,
+                    "page": 1,
+                },
+                timeout=15,
+            )
+
+            if r.status_code != 200:
+                print(f"Apollo search failed for {org}: {r.status_code}")
+                continue
+
+            data = r.json()
+            people = data.get("people", [])
+            contacts = []
+            for p in people:
+                contacts.append({
+                    "name": p.get("name", ""),
+                    "title": p.get("title", ""),
+                    "email": p.get("email", ""),
+                    "phone": (p.get("phone_numbers") or [{}])[0].get("sanitized_number", "") if p.get("phone_numbers") else "",
+                    "linkedin": p.get("linkedin_url", ""),
+                    "city": p.get("city", ""),
+                    "state": p.get("state", ""),
+                })
+
+            if contacts:
+                results[org] = contacts
+                print(f"Apollo: {org} -> {len(contacts)} contacts")
+
+        except Exception as e:
+            print(f"Apollo error for {org}: {e}")
+
+    print(f"Apollo enrichment: {len(results)} orgs, {sum(len(v) for v in results.values())} contacts")
+    return results
+
+
+# ============================================================
 # JSON output (for API responses)
 # ============================================================
 
-def to_json(attendees: list[Attendee], project_name: str = "") -> dict:
+def to_json(attendees: list[Attendee], project_name: str = "", apollo_contacts: dict[str, list[dict]] | None = None) -> dict:
     """Build the JSON response for the frontend."""
 
     # Group by canonical org
@@ -654,15 +729,25 @@ def to_json(attendees: list[Attendee], project_name: str = "") -> dict:
     for best, rows in org_rows:
         if best.tier > 3:
             continue
-        top_orgs.append({
+        canonical = best.canonical_org or best.organization
+        org_entry = {
             "tier": best.tier,
-            "canonical": best.canonical_org or best.organization,
+            "canonical": canonical,
             "zoho": best.zoho_status,
             "reps": len(rows),
             "contact": f"{best.first_name} {best.last_name}".strip(),
             "email": best.email,
             "title": best.job_title,
-        })
+        }
+        # Attach Apollo contacts if available
+        if apollo_contacts:
+            # Try matching by canonical name or org name
+            ac = apollo_contacts.get(canonical, [])
+            if not ac:
+                ac = apollo_contacts.get(best.organization, [])
+            if ac:
+                org_entry["apolloContacts"] = ac
+        top_orgs.append(org_entry)
 
     return {
         "project": project_name,

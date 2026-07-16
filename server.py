@@ -11,7 +11,7 @@ import base64
 import tempfile
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from go_deep_ranker import go_deep, write_excel, to_json
+from go_deep_ranker import go_deep, write_excel, to_json, apollo_enrich
 
 app = Flask(__name__)
 CORS(app)
@@ -55,6 +55,13 @@ def run_go_deep():
         # Run the ranker
         attendees = go_deep(input_path, sector=sector)
 
+        # Apollo enrichment — pull contacts for Tier 1-3 orgs
+        tier_1_3_orgs = set()
+        for a in attendees:
+            if a.tier <= 3:
+                tier_1_3_orgs.add(a.canonical_org or a.organization)
+        apollo_contacts = apollo_enrich(sorted(tier_1_3_orgs)) if tier_1_3_orgs else {}
+
         # Generate Excel
         excel_filename = f"Go_Deep_{run_id}.xlsx"
         excel_path = os.path.join(OUTPUT_DIR, excel_filename)
@@ -65,7 +72,7 @@ def run_go_deep():
             excel_b64 = base64.b64encode(f.read()).decode("utf-8")
 
         # Build JSON response
-        result = to_json(attendees, project_name=project_name)
+        result = to_json(attendees, project_name=project_name, apollo_contacts=apollo_contacts)
         result["excelBase64"] = excel_b64
         result["excelFilename"] = f"Go_Deep_{project_name.replace(' ', '_')}.xlsx"
         result["runId"] = run_id
