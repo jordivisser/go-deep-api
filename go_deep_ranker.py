@@ -416,7 +416,7 @@ def assign_tier(a: Attendee) -> None:
 
     # Tier scoring baseline
     if a.role_class == "GC_PRIME":
-        if a.zoho_status in ("Existing Client", "Prior Work"):
+        if a.zoho_status in ("Existing Client", "Prior Work", "Existing Account"):
             a.tier, a.tier_label = 1, "Tier 1 — Prime GC + Relationship"
         elif a.zoho_status == "Warm Contact":
             a.tier, a.tier_label = 2, "Tier 2 — Prime GC + Warm Contact"
