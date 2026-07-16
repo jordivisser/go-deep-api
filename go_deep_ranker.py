@@ -94,15 +94,98 @@ HEAVY_CIVIL_DESIGN_PRIMES = [
 
 
 # ============================================================
-# Zoho Accounts STUB — replace with live crm_crossref pull
+# Zoho Accounts — live pull
+# ============================================================
+
+import os
+import requests
+
+
+def get_zoho_access_token() -> str | None:
+    """Exchange refresh token for access token. Same pattern as crm_crossref.py."""
+    client_id = os.environ.get("ZOHO_CLIENT_ID")
+    client_secret = os.environ.get("ZOHO_CLIENT_SECRET")
+    refresh_token = os.environ.get("ZOHO_REFRESH_TOKEN")
+
+    if not all([client_id, client_secret, refresh_token]):
+        print("Zoho credentials not set -- falling back to stub")
+        return None
+
+    try:
+        r = requests.post(
+            "https://accounts.zoho.com/oauth/v2/token",
+            params={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+            },
+            timeout=10,
+        )
+        data = r.json()
+        return data.get("access_token")
+    except Exception as e:
+        print(f"Zoho token refresh failed: {e}")
+        return None
+
+
+def fetch_zoho_accounts(token: str) -> dict[str, str]:
+    """Pull all Account names from Zoho CRM. Returns dict of name -> 'Existing Account'."""
+    accounts: dict[str, str] = {}
+    page = 1
+    per_page = 200
+
+    while True:
+        try:
+            r = requests.get(
+                "https://www.zohoapis.com/crm/v2/Accounts",
+                headers={"Authorization": f"Zoho-oauthtoken {token}"},
+                params={"page": page, "per_page": per_page, "fields": "Account_Name"},
+                timeout=15,
+            )
+            data = r.json()
+            records = data.get("data", [])
+            if not records:
+                break
+
+            for rec in records:
+                name = rec.get("Account_Name", "").strip()
+                if name:
+                    accounts[name] = "Existing Account"
+
+            info = data.get("info", {})
+            if not info.get("more_records", False):
+                break
+            page += 1
+
+        except Exception as e:
+            print(f"Zoho Accounts fetch error on page {page}: {e}")
+            break
+
+    print(f"Fetched {len(accounts)} Zoho Accounts")
+    return accounts
+
+
+def get_zoho_accounts() -> dict[str, str] | None:
+    """Get all Zoho Accounts. Returns None if credentials missing or fetch fails."""
+    token = get_zoho_access_token()
+    if not token:
+        return None
+    accounts = fetch_zoho_accounts(token)
+    if not accounts:
+        return None
+    return accounts
+
+
+# ============================================================
+# Zoho Accounts STUB — fallback when env vars not set
 # ============================================================
 
 # Stub keyed by canonical prime name (matches HEAVY_CIVIL_GC_PRIMES first tuple element).
-# Replace with live Zoho Accounts pull via crm_crossref.py.
 STELIC_ACCOUNTS_STUB = {
     "Halmar International": "Prior Work",
     "Skanska": "Existing Client",
-    "S&B USA / Fay": "Existing Client",   # Brook called "Kuhn Benui" — corp parent is Shikun/S&B USA
+    "S&B USA / Fay": "Existing Client",
     "Lane Construction": "Prior Work",
     "OHLA": "Prior Work",
     "Aldridge Electric": "Warm Contact",
@@ -383,7 +466,10 @@ def go_deep(
     else:
         raise NotImplementedError(f"Sector not yet supported: {sector}")
 
-    accounts = accounts if accounts is not None else STELIC_ACCOUNTS_STUB
+    if accounts is None:
+        # Try live Zoho pull first, fall back to stub
+        live = get_zoho_accounts()
+        accounts = live if live else STELIC_ACCOUNTS_STUB
 
     attendees = extract_registration_pdf(path)
     # Drop rows with no org
