@@ -423,14 +423,13 @@ def assign_tier(a: Attendee) -> None:
         else:
             a.tier, a.tier_label = 3, "Tier 3 — Prime GC (Cold)"
     elif a.role_class == "POSSIBLE_GC_PRIME":
-        # Same as Tier 3 but mark reasoning
         if a.zoho_status != "Cold":
-            a.tier, a.tier_label = 3, "Tier 3 — Possible Prime GC + Relationship"
+            a.tier, a.tier_label = 1, "Tier 1 — Prime GC + Relationship"
         else:
             a.tier, a.tier_label = 4, "Tier 4 — Possible Prime GC (Cold)"
     elif a.role_class == "DESIGN_PRIME":
         if a.zoho_status != "Cold":
-            a.tier, a.tier_label = 4, "Tier 4 — Design Prime + Relationship"
+            a.tier, a.tier_label = 2, "Tier 2 — Design/Consultant + Relationship"
         else:
             a.tier, a.tier_label = 5, "Tier 5 — Design Prime (Cold)"
     elif a.role_class in ("DESIGN_CONSULTANT", "SUB"):
