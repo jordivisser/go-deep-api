@@ -416,7 +416,7 @@ def assign_tier(a: Attendee) -> None:
 
     # Tier scoring baseline
     if a.role_class == "GC_PRIME":
-        if a.zoho_status in ("Existing Client", "Prior Work", "Existing Account"):
+        if a.zoho_status in ("Existing Client", "Prior Work"):
             a.tier, a.tier_label = 1, "Tier 1 — Prime GC + Relationship"
         elif a.zoho_status == "Warm Contact":
             a.tier, a.tier_label = 2, "Tier 2 — Prime GC + Warm Contact"
@@ -628,22 +628,22 @@ APOLLO_MAX_PER_ORG = 3  # Max contacts per org
 
 def apollo_enrich(org_names: list[str]) -> dict[str, list[dict]]:
     """Search Apollo for decision-maker contacts at each org.
-    Returns {org_name: [{name, title, email, phone, linkedin}]}."""
+    Two-step: search for IDs, then bulk_match to reveal details.
+    Returns {org_name: [{name, title, email, linkedin}]}."""
     api_key = os.environ.get("APOLLO_API_KEY")
     if not api_key:
         print("APOLLO_API_KEY not set -- skipping enrichment")
         return {}
 
+    headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
     results: dict[str, list[dict]] = {}
 
     for org in org_names[:APOLLO_MAX_ORGS]:
         try:
+            # Step 1: Search for people IDs
             r = requests.post(
-                "https://api.apollo.io/api/v1/mixed_people/search",
-                headers={
-                    "X-Api-Key": api_key,
-                    "Content-Type": "application/json",
-                },
+                "https://api.apollo.io/api/v1/mixed_people/api_search",
+                headers=headers,
                 json={
                     "q_organization_name": org,
                     "person_titles": APOLLO_TARGET_TITLES,
@@ -658,15 +658,39 @@ def apollo_enrich(org_names: list[str]) -> dict[str, list[dict]]:
                 print(f"Apollo search failed for {org}: {r.status_code}")
                 continue
 
-            data = r.json()
-            people = data.get("people", [])
+            people = r.json().get("people", [])
+            if not people:
+                continue
+
+            # Step 2: Reveal contacts via bulk_match
+            person_ids = [p["id"] for p in people if p.get("id")]
+            if not person_ids:
+                continue
+
+            r2 = requests.post(
+                "https://api.apollo.io/api/v1/people/bulk_match",
+                headers=headers,
+                json={
+                    "details": [{"id": pid} for pid in person_ids],
+                    "reveal_personal_emails": True,
+                },
+                timeout=15,
+            )
+
+            if r2.status_code != 200:
+                print(f"Apollo reveal failed for {org}: {r2.status_code}")
+                continue
+
+            matches = r2.json().get("matches", [])
             contacts = []
-            for p in people:
+            for p in matches:
+                if not p:
+                    continue
                 contacts.append({
-                    "name": p.get("name", ""),
+                    "name": f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
                     "title": p.get("title", ""),
                     "email": p.get("email", ""),
-                    "phone": (p.get("phone_numbers") or [{}])[0].get("sanitized_number", "") if p.get("phone_numbers") else "",
+                    "phone": "",
                     "linkedin": p.get("linkedin_url", ""),
                     "city": p.get("city", ""),
                     "state": p.get("state", ""),
