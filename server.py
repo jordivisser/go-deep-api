@@ -11,7 +11,7 @@ import base64
 import tempfile
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from go_deep_ranker import go_deep, write_excel, to_json, apollo_enrich
+from go_deep_ranker import go_deep, write_excel, to_json, apollo_enrich, extract_rfq_metadata
 
 app = Flask(__name__)
 CORS(app)
@@ -30,26 +30,35 @@ def run_go_deep():
     """
     Accepts multipart form:
       - attendee_file: PDF or Excel (required)
+      - rfq_file: PDF (optional)
       - project_name: string (required)
       - sector: string (default: heavy_civil)
 
-    Returns JSON with tier summary, ranked orgs, and base64-encoded Excel.
+    Returns JSON with tier summary, ranked orgs, Apollo contacts,
+    RFQ metadata, and base64-encoded Excel.
     """
     if "attendee_file" not in request.files:
         return jsonify({"error": "attendee_file is required"}), 400
 
     file = request.files["attendee_file"]
+    rfq_file = request.files.get("rfq_file")
     project_name = request.form.get("project_name", "Untitled Project")
     sector = request.form.get("sector", "heavy_civil")
 
     if not file.filename:
         return jsonify({"error": "Empty file"}), 400
 
-    # Save uploaded file
+    # Save uploaded files
     run_id = uuid.uuid4().hex[:8]
     ext = os.path.splitext(file.filename)[1] or ".pdf"
     input_path = os.path.join(UPLOAD_DIR, f"{run_id}{ext}")
     file.save(input_path)
+
+    rfq_path = None
+    if rfq_file and rfq_file.filename:
+        rfq_ext = os.path.splitext(rfq_file.filename)[1] or ".pdf"
+        rfq_path = os.path.join(UPLOAD_DIR, f"{run_id}_rfq{rfq_ext}")
+        rfq_file.save(rfq_path)
 
     try:
         # Run the ranker
@@ -61,6 +70,11 @@ def run_go_deep():
             if a.tier <= 3:
                 tier_1_3_orgs.add(a.canonical_org or a.organization)
         apollo_contacts = apollo_enrich(sorted(tier_1_3_orgs)) if tier_1_3_orgs else {}
+
+        # RFQ extraction (if uploaded)
+        rfq_metadata = None
+        if rfq_path:
+            rfq_metadata = extract_rfq_metadata(rfq_path)
 
         # Generate Excel
         excel_filename = f"Go_Deep_{run_id}.xlsx"
@@ -76,6 +90,8 @@ def run_go_deep():
         result["excelBase64"] = excel_b64
         result["excelFilename"] = f"Go_Deep_{project_name.replace(' ', '_')}.xlsx"
         result["runId"] = run_id
+        if rfq_metadata:
+            result["rfqMetadata"] = rfq_metadata
 
         return jsonify(result)
 
@@ -83,9 +99,11 @@ def run_go_deep():
         return jsonify({"error": str(e)}), 500
 
     finally:
-        # Clean up input file
+        # Clean up input files
         if os.path.exists(input_path):
             os.remove(input_path)
+        if rfq_path and os.path.exists(rfq_path):
+            os.remove(rfq_path)
 
 
 @app.route("/api/go-deep/download/<run_id>", methods=["GET"])

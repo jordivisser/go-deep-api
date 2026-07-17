@@ -1,5 +1,5 @@
 """
-go_deep_ranker.py — Brook's Go Deep attendee ranking module.
+
 
 Given an attendee list (registration PDF or sign-in sheet), rank orgs by
 priority for BD outreach:
@@ -10,11 +10,6 @@ priority for BD outreach:
   Tier 4: Engineer/consultant prime + relationship
   Tier 5: Engineer/consultant prime + cold
   Tier 6: Sub / specialty / supplier / not directly useful
-
-Ranking model derived from Brook's transcript walking through Key Bridge
-attendees ("Halmar's a big GC, Skanska's a big GC, that's a metal
-fabricator"). Primary key is capability to prime the project; secondary is
-Zoho Accounts relationship; tertiary is sector fit.
 
 Sector-aware: known-primes lists differ per sector. This build targets
 heavy_civil (Key Bridge, SITES conveyance). Data-center / pharma variants
@@ -610,6 +605,145 @@ def write_excel(attendees: list[Attendee], out_path: str) -> None:
     ws3.freeze_panes = "A2"
 
     wb.save(out_path)
+
+
+# ============================================================
+# RFQ / RFP metadata extraction via Claude
+# ============================================================
+
+import json
+import base64
+
+RFQ_EXTRACTION_PROMPT = """You are an expert construction procurement analyst. Extract the following from this RFQ/RFP document and return ONLY valid JSON, no markdown fences, no preamble.
+
+{
+  "procurement_contact": {
+    "name": "string or null",
+    "email": "string or null",
+    "phone": "string or null",
+    "method": "how to communicate (email only, portal only, etc.) or null"
+  },
+  "procurement_platform": {
+    "name": "Planet Bids, Bonfire, DemandStar, PublicPurchase, agency website, etc. or null",
+    "url": "direct URL if mentioned or null",
+    "solicitation_number": "string or null",
+    "registration_required": true/false
+  },
+  "project_summary": {
+    "name": "official project name",
+    "owner": "agency or owner name",
+    "location": "city, state",
+    "estimated_value": "dollar amount or range if stated, null if not",
+    "delivery_method": "CMAR, Design-Build, Design-Bid-Build, etc. or null",
+    "scope": "2-3 sentence summary of what is being built"
+  },
+  "key_dates": [
+    {"event": "string", "date": "string", "notes": "optional context"}
+  ],
+  "scoring": {
+    "categories": [
+      {"name": "string", "weight_percent": number or null, "notes": "optional"}
+    ],
+    "evaluation_method": "best value, lowest price, qualifications-based, etc. or null"
+  },
+  "pass_fail_requirements": [
+    "string description of each pass/fail requirement"
+  ],
+  "required_experience": [
+    "string description of each experience requirement"
+  ],
+  "pre_proposal_conference": {
+    "date": "string or null",
+    "location": "string or null",
+    "mandatory": true/false/null,
+    "attendee_list_available": true/false/null
+  },
+  "stelic_fit_assessment": "2-3 sentences on how Stelic's project controls, scheduling, and program management services fit this opportunity based on the scoring weights and requirements"
+}
+
+Be precise with dates. If a field is not found in the document, use null. Extract ALL dates mentioned in the procurement timeline."""
+
+
+def extract_rfq_metadata(pdf_path: str) -> dict | None:
+    """Send RFQ PDF to Claude for structured extraction."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("ANTHROPIC_API_KEY not set -- skipping RFQ extraction")
+        return None
+
+    try:
+        # Read PDF as base64
+        with open(pdf_path, "rb") as f:
+            pdf_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        # Check file size — Claude has limits on document size
+        pdf_size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
+        if pdf_size_mb > 30:
+            print(f"RFQ PDF too large ({pdf_size_mb:.1f} MB) -- skipping")
+            return None
+
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 4000,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": pdf_b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": RFQ_EXTRACTION_PROMPT,
+                            },
+                        ],
+                    }
+                ],
+            },
+            timeout=120,
+        )
+
+        if r.status_code != 200:
+            print(f"Claude API error: {r.status_code} — {r.text[:300]}")
+            return None
+
+        data = r.json()
+        # Check for truncation
+        if data.get("stop_reason") != "end_turn":
+            print(f"Claude response truncated: stop_reason={data.get('stop_reason')}")
+
+        # Extract text content
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+
+        # Strip markdown fences if present
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        result = json.loads(text)
+        print(f"RFQ extraction complete: {result.get('project_summary', {}).get('name', 'unknown')}")
+        return result
+
+    except json.JSONDecodeError as e:
+        print(f"RFQ JSON parse error: {e}")
+        print(f"Raw text: {text[:500]}")
+        return None
+    except Exception as e:
+        print(f"RFQ extraction error: {e}")
+        return None
 
 
 # ============================================================
