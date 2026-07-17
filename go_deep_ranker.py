@@ -1,5 +1,5 @@
 """
-
+go_deep_ranker.py — Brook's Go Deep attendee ranking module.
 
 Given an attendee list (registration PDF or sign-in sheet), rank orgs by
 priority for BD outreach:
@@ -10,6 +10,11 @@ priority for BD outreach:
   Tier 4: Engineer/consultant prime + relationship
   Tier 5: Engineer/consultant prime + cold
   Tier 6: Sub / specialty / supplier / not directly useful
+
+Ranking model derived from Brook's transcript walking through Key Bridge
+attendees ("Halmar's a big GC, Skanska's a big GC, that's a metal
+fabricator"). Primary key is capability to prime the project; secondary is
+Zoho Accounts relationship; tertiary is sector fit.
 
 Sector-aware: known-primes lists differ per sector. This build targets
 heavy_civil (Key Bridge, SITES conveyance). Data-center / pharma variants
@@ -357,6 +362,189 @@ def extract_registration_pdf(path: str) -> list[Attendee]:
 
 
 # ============================================================
+# Excel / CSV extraction
+# ============================================================
+
+import csv
+import openpyxl as _openpyxl
+
+# Map common column header variations to Attendee fields
+_COLUMN_MAP = {
+    "first name": "first_name",
+    "first": "first_name",
+    "firstname": "first_name",
+    "last name": "last_name",
+    "last": "last_name",
+    "lastname": "last_name",
+    "name": "_full_name",
+    "full name": "_full_name",
+    "email": "email",
+    "email address": "email",
+    "e-mail": "email",
+    "phone": "phone",
+    "phone number": "phone",
+    "telephone": "phone",
+    "organization": "organization",
+    "company": "organization",
+    "company name": "organization",
+    "org": "organization",
+    "firm": "organization",
+    "current company": "organization",
+    "title": "job_title",
+    "job title": "job_title",
+    "position": "job_title",
+    "current title": "job_title",
+    "headline": "job_title",
+    "website": "website",
+    "hq": "hq",
+    "headquarters": "hq",
+    "location": "hq",
+    "city": "hq",
+    "teaming": "teaming_interest",
+    "teaming interest": "teaming_interest",
+    "role": "teaming_interest",
+    "packages": "packages",
+    "contract packages": "packages",
+    "linkedin": "website",
+    "profile url": "website",
+}
+
+
+def _map_columns(headers: list[str]) -> dict[int, str]:
+    """Map column indices to Attendee field names."""
+    mapping = {}
+    for i, h in enumerate(headers):
+        if not h:
+            continue
+        key = h.strip().lower()
+        if key in _COLUMN_MAP:
+            mapping[i] = _COLUMN_MAP[key]
+    return mapping
+
+
+def _row_to_attendee(row: list[str], col_map: dict[int, str]) -> Attendee | None:
+    """Convert a data row to an Attendee using column mapping."""
+    a = Attendee()
+    full_name = ""
+    for i, field_name in col_map.items():
+        if i >= len(row):
+            continue
+        val = str(row[i] or "").strip()
+        if not val:
+            continue
+        if field_name == "_full_name":
+            full_name = val
+        else:
+            setattr(a, field_name, val)
+
+    # Split full name if first/last not set
+    if full_name and not a.first_name and not a.last_name:
+        parts = full_name.split(None, 1)
+        a.first_name = parts[0] if parts else ""
+        a.last_name = parts[1] if len(parts) > 1 else ""
+
+    if not a.organization and not a.email:
+        return None
+    return a
+
+
+def extract_excel(path: str) -> list[Attendee]:
+    """Extract attendees from an Excel file (.xlsx/.xls)."""
+    attendees: list[Attendee] = []
+    wb = _openpyxl.load_workbook(path, data_only=True, read_only=True)
+
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
+            continue
+
+        # Find header row (first row with 3+ non-empty cells)
+        header_idx = 0
+        for i, row in enumerate(rows[:5]):
+            non_empty = sum(1 for c in row if c)
+            if non_empty >= 3:
+                header_idx = i
+                break
+
+        headers = [str(c or "") for c in rows[header_idx]]
+        col_map = _map_columns(headers)
+
+        if not col_map:
+            continue
+        # Must have at least an org or email column
+        if "organization" not in col_map.values() and "email" not in col_map.values():
+            continue
+
+        for row in rows[header_idx + 1:]:
+            row_strs = [str(c or "") for c in row]
+            a = _row_to_attendee(row_strs, col_map)
+            if a:
+                attendees.append(a)
+
+    wb.close()
+    return attendees
+
+
+def extract_csv(path: str) -> list[Attendee]:
+    """Extract attendees from a CSV or TSV file."""
+    attendees: list[Attendee] = []
+
+    # Detect delimiter
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        sample = f.read(2048)
+    dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.reader(f, dialect)
+        rows = list(reader)
+
+    if len(rows) < 2:
+        return attendees
+
+    headers = rows[0]
+    col_map = _map_columns(headers)
+
+    if not col_map:
+        return attendees
+    if "organization" not in col_map.values() and "email" not in col_map.values():
+        return attendees
+
+    for row in rows[1:]:
+        a = _row_to_attendee(row, col_map)
+        if a:
+            attendees.append(a)
+
+    return attendees
+
+
+def extract_attendees(path: str) -> list[Attendee]:
+    """Route to the correct parser based on file type."""
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext in (".csv", ".tsv"):
+        print(f"Parsing as CSV: {path}")
+        return extract_csv(path)
+
+    if ext in (".xlsx", ".xls"):
+        # Check if it's actually a PDF mislabeled as xlsx
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        if magic == b"%PDF":
+            print(f"File is PDF mislabeled as {ext}: {path}")
+            return extract_registration_pdf(path)
+        print(f"Parsing as Excel: {path}")
+        return extract_excel(path)
+
+    if ext == ".pdf":
+        print(f"Parsing as PDF: {path}")
+        return extract_registration_pdf(path)
+
+    # Default: try PDF
+    print(f"Unknown extension {ext}, trying PDF: {path}")
+    return extract_registration_pdf(path)
+
+
+# ============================================================
 # Classification + tier assignment
 # ============================================================
 
@@ -469,7 +657,7 @@ def go_deep(
         live = get_zoho_accounts()
         accounts = live if live else STELIC_ACCOUNTS_STUB
 
-    attendees = extract_registration_pdf(path)
+    attendees = extract_attendees(path)
     # Drop rows with no org
     attendees = [a for a in attendees if (a.organization or "").strip()]
     print(f"Extracted {len(attendees)} attendee rows")
