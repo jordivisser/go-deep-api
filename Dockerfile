@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY go_deep_ranker.py .
 COPY server.py .
+COPY deep_research.py .
 
 EXPOSE 5001
 
