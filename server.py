@@ -120,6 +120,33 @@ def download_excel(run_id: str):
     return jsonify({"error": "File not found"}), 404
 
 
+@app.route("/api/deep-research", methods=["POST"])
+def run_deep_research():
+    """
+    Accepts JSON:
+      - project_name: string (required)
+      - owner: string (optional)
+      - location: string (optional)
+
+    Returns structured intelligence about the project.
+    """
+    from deep_research import deep_research
+
+    data = request.get_json()
+    if not data or not data.get("project_name"):
+        return jsonify({"error": "project_name is required"}), 400
+
+    try:
+        result = deep_research(
+            project_name=data["project_name"],
+            owner=data.get("owner", ""),
+            location=data.get("location", ""),
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=False)
